@@ -1,0 +1,20 @@
+{
+  "timeZone": "Asia/Kolkata",
+  "dependencies": {
+    "libraries": [
+      {
+        "userSymbol": "HolidayBot",
+        "version": "0",
+        "libraryId": "1WHnKNW8bgUHeg6Pj3dTcD8ta9u3ZPHn-Y7P3M6etcrB32WQC7VFcZvE6",
+        "developmentMode": true
+      },
+      {
+        "userSymbol": "OAuth2",
+        "version": "43",
+        "libraryId": "1B7FSrk5Zi6L1rSxxTDgDEUsPzlukDsi4KGuTMorsTQHhGBzBkMun4iDF"
+      }
+    ]
+  },
+  "exceptionLogging": "STACKDRIVER",
+  "runtimeVersion": "V8"
+}
