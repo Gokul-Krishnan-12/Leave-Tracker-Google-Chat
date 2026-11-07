@@ -1,6 +1,6 @@
 /**
  * =========================================================
- * Pixcity Leave Tracker (High-Performance Optimized)
+ * Google Chat Leave Tracker (High-Performance Optimized)
  * =========================================================
  *
  * Requires:
@@ -15,7 +15,7 @@
  * =========================================================
  */
 const CONFIG = {
-  SPREADSHEET_ID: "1oUG64p88KWdlFmHGSYvf1wOSb14uUzcgWflxU3IJ788",
+  SPREADSHEET_ID: "Add Sheet id here",
   SHEET_NAME: "Requests",
   TEAM_SHEET_PREFIX: "Leave_",
   BOT_USERS_SHEET_NAME: "BotUsers",
@@ -68,7 +68,7 @@ const ROLE_MANAGER = "ROLE_MANAGER";
  * =========================================================
  * DYNAMIC TEAM / ROLE HELPERS
  * Settings!A:B supports: TEAMS | DEV,GH,SEO
- * Team request sheets are created automatically as Leave_DEV, Leave_GH, etc.
+ * Team request sheets are created lazily per leave year, e.g. Leave_DEV_2026.
  * BotUsers.Role stores comma-separated roles, e.g. ROLE_DEV,ROLE_DEV_APPROVER.
  * =========================================================
  */
@@ -119,29 +119,87 @@ function getUserTeam_(identifier) {
   const teams = getUserTeamsFromRoles_(roles);
   return teams.length ? teams[0] : "";
 }
-function getTeamSheetName_(team) {
+function getLeaveSheetHeaders_() {
+  return ["Request ID", "Employee", "Email", "Date / Range", "Leave Type", "No of Days", "Reason / Comment", "Approvals", "Final Status"];
+}
+
+/** Returns the request tab for a team's leave year. */
+function getTeamSheetName_(team, year) {
   const normalized = normalizeTeam_(team);
   if (!normalized || getConfiguredTeams_().indexOf(normalized) === -1) {
     throw new Error("Unknown team: " + team);
   }
-  return CONFIG.TEAM_SHEET_PREFIX + normalized;
+  const leaveYear = Number(year);
+  if (!Number.isInteger(leaveYear) || leaveYear < 2000 || leaveYear > 2100) {
+    throw new Error("A valid leave year is required for team sheet: " + team);
+  }
+  return CONFIG.TEAM_SHEET_PREFIX + normalized + "_" + leaveYear;
 }
-function getTeamRequestData_(team) {
-  const sheetName = getTeamSheetName_(team);
-  ensureSheet_(sheetName, ["Request ID", "Employee", "Email", "Date / Range", "Leave Type", "No of Days", "Reason / Comment", "Approvals", "Final Status"]);
-  return getSheetData_(sheetName);
+
+/**
+ * Reads an exact year sheet when year is supplied. Without a year, combines
+ * all existing year-specific tabs (and the legacy Leave_TEAM tab during migration).
+ * Read operations never create tabs; tabs are created only when a request is saved.
+ */
+function getTeamRequestData_(team, year) {
+  const normalized = normalizeTeam_(team);
+  if (!normalized || getConfiguredTeams_().indexOf(normalized) === -1) return [];
+
+  if (year !== undefined && year !== null && year !== "") {
+    const sheetName = getTeamSheetName_(normalized, year);
+    try { return getSheetData_(sheetName); } catch (err) { return []; }
+  }
+
+  const entries = getAllTeamRequestSheets_().filter(function (entry) {
+    return entry.team === normalized;
+  });
+  let combined = [];
+  entries.forEach(function (entry) {
+    let rows = [];
+    try { rows = getSheetData_(entry.sheetName); } catch (err) { return; }
+    if (!rows || !rows.length) return;
+    if (!combined.length) combined = rows.slice();
+    else if (rows.length > 1) combined = combined.concat(rows.slice(1));
+  });
+  return combined;
 }
+
 function getRequestDataForUser_(identifier) {
   const team = getUserTeam_(identifier);
   if (!team) return [];
   return getTeamRequestData_(team);
 }
+
+/** Enumerates existing request tabs only. Supports legacy Leave_TEAM tabs. */
 function getAllTeamRequestSheets_() {
-  return getConfiguredTeams_().map(function (team) { return { team: team, sheetName: getTeamSheetName_(team) }; });
+  const configuredTeams = getConfiguredTeams_();
+  const metadata = sheetsApiRequest_("get", "?fields=sheets(properties(title))");
+  const titles = (metadata.sheets || []).map(function (sheet) {
+    return String(sheet.properties && sheet.properties.title || "");
+  });
+  const entries = [];
+  configuredTeams.forEach(function (team) {
+    const legacyName = CONFIG.TEAM_SHEET_PREFIX + team;
+    const yearPrefix = legacyName + "_";
+    titles.forEach(function (title) {
+      if (title === legacyName) {
+        entries.push({ team: team, year: null, sheetName: title, legacy: true });
+        return;
+      }
+      if (title.indexOf(yearPrefix) !== 0) return;
+      const yearText = title.substring(yearPrefix.length);
+      if (!/^\d{4}$/.test(yearText)) return;
+      entries.push({ team: team, year: Number(yearText), sheetName: title, legacy: false });
+    });
+  });
+  entries.sort(function (a, b) {
+    return a.team.localeCompare(b.team) || (Number(a.year || 0) - Number(b.year || 0));
+  });
+  return entries;
 }
 function getTeamPickerCard_(userName, userEmail, userId, title) {
   const teams = getConfiguredTeams_();
-  const widgets = [{ textParagraph: { text: "Choose your team to finish setting up Pixcity Leave Tracker. Your leave requests and approvals will be stored separately for that team." } }];
+  const widgets = [{ textParagraph: { text: "Choose your team to finish setting up Google Chat Leave Tracker. Your leave requests and approvals will be stored separately for that team." } }];
   if (!teams.length) {
     widgets.push({ textParagraph: { text: "No teams are configured. Add a <code>TEAMS</code> setting in the <code>Settings</code> sheet, for example <code>DEV,GH,SEO</code>." } });
   } else {
@@ -149,7 +207,7 @@ function getTeamPickerCard_(userName, userEmail, userId, title) {
       return actionButton_(team, "chooseTeam", [{ key: "team", value: team }]);
     }) } });
   }
-  return { cardsV2: [{ cardId: "chooseTeam", card: { header: { title: title || "👥 Choose Your Team", subtitle: "Welcome " + (userName || "to Pixcity Leave Tracker") }, sections: [{ widgets: widgets }] } }] };
+  return { cardsV2: [{ cardId: "chooseTeam", card: { header: { title: title || "👥 Choose Your Team", subtitle: "Welcome " + (userName || "to Google Chat Leave Tracker") }, sections: [{ widgets: widgets }] } }] };
 }
 function userNeedsTeamSelection_(identifier) {
   const user = getEmployeeBotUserData_(identifier);
@@ -362,36 +420,48 @@ function infoCard_(title, text, options) {
  * =========================================================
  */
 function onAddedToSpace(event) {
-  try {
-    registerBotUserFromEvent_(event);
-  } catch (regErr) {
-    console.error("registerBotUser error in onAddedToSpace: " + regErr);
-  }
+  // Always join silently. Do not register users or send a welcome card
+  // when the app is added to any space, including direct messages.
+  const spaceType = getChatSpaceType_(event) || "UNKNOWN";
+  const spaceName =
+    (event && event.space && event.space.name) ||
+    (event && event.chat && event.chat.space && event.chat.space.name) ||
+    "unknown";
 
-  const chat = (event && event.chat) || {};
-  const messagePayload = chat.messagePayload || {};
-  const user = chat.user || messagePayload.user || (event && event.user) || {};
-  let displayName = user.displayName || "Employee";
-  let userEmail = user.email ? user.email.toLowerCase().trim() : "";
-  const userId = user.name || "";
+  console.log(
+    "ADDED_TO_SPACE received. Space: " + spaceName +
+    ", Type: " + spaceType + ". No welcome message sent."
+  );
 
-  if (!userEmail && userId) {
-    const existing = getEmployeeBotUserData_(userId);
-    if (existing && existing.email) {
-      userEmail = existing.email;
-      if (existing.name && (!displayName || displayName === "Employee")) displayName = existing.name;
-    }
-  }
-
-  setSessionUser_(userEmail, userId, displayName);
-  if (userEmail && userNeedsTeamSelection_(userEmail)) {
-    return reply_(getTeamPickerCard_(displayName, userEmail, userId));
-  }
-  return reply_(getWelcomeCard(displayName, userEmail, userId));
+  return {};
 }
 
 function onAddToSpace(event) {
   return onAddedToSpace(event);
+}
+
+
+/**
+ * Returns the Google Chat space type.
+ */
+function getChatSpaceType_(event) {
+  const chat = (event && event.chat) || {};
+  const messagePayload = chat.messagePayload || {};
+
+  const space =
+    chat.space ||
+    messagePayload.space ||
+    (event && event.space) ||
+    {};
+
+  return String(space.type || "").toUpperCase();
+}
+
+/**
+ * Checks whether the event belongs to an individual DM.
+ */
+function isDirectMessageEvent_(event) {
+  return getChatSpaceType_(event) === "DIRECT_MESSAGE";
 }
 
 function onRemoveFromSpace(event) {
@@ -406,6 +476,13 @@ function onRemovedFromSpace(event) {
 }
 
 function onAppHome(event) {
+  // App Home must never display employee/welcome content in a group space.
+  // Fail closed when the event does not explicitly identify a direct message.
+  if (!isDirectMessageEvent_(event)) {
+    console.log("APP_HOME ignored: event is not an individual DM.");
+    return {};
+  }
+
   const chat = (event && event.chat) || {};
   const messagePayload = chat.messagePayload || {};
   const user = chat.user || messagePayload.user || (event && event.user) || {};
@@ -471,9 +548,13 @@ function getAdminResourceCard_(kind, email, userId) {
   if (normalized === "users" || normalized === "all") add("BotUsers sheet", CONFIG.BOT_USERS_SHEET_NAME);
   if (normalized === "settings" || normalized === "all") add("Settings sheet", CONFIG.HR_NOTIFICATION_SETTINGS_SHEET_NAME);
   if (normalized === "teams" || normalized === "all") {
-    getConfiguredTeams_().forEach(function (team) {
-      add("Leave_" + team + " sheet", getTeamSheetName_(team));
+    const requestSheets = getAllTeamRequestSheets_();
+    requestSheets.forEach(function (entry) {
+      add(entry.sheetName, entry.sheetName);
     });
+    if (!requestSheets.length) {
+      links.push("No team request tabs exist yet. Each team/year tab is created automatically when its first leave request is submitted.");
+    }
   }
   if (normalized === "document" || normalized === "all") {
     const docUrl = String(settings.PROJECT_DOCUMENT_URL || settings.PROJECT_DOC_URL || settings.DOCUMENTATION_URL || "").trim();
@@ -592,6 +673,25 @@ function onMessage(event) {
   let senderUserId = "";
 
   try {
+    // SECURITY BOUNDARY:
+    // All interactive leave-tracker functionality is DM-only.
+    // Group/channel events are ignored, including mentions and slash commands.
+    // Scheduled global notifications are sent separately through the Chat API
+    // and do not depend on this incoming-message handler.
+    if (!isDirectMessageEvent_(event)) {
+      const spaceType = getChatSpaceType_(event) || "UNKNOWN";
+      const spaceName =
+        (event && event.chat && event.chat.space && event.chat.space.name) ||
+        (event && event.space && event.space.name) ||
+        "unknown";
+
+      console.log(
+        "Incoming message ignored. Space type: " + spaceType +
+        "; space: " + spaceName + ". Bot is notification-only in groups/channels."
+      );
+      return {};
+    }
+
     const chat = (event && event.chat) || {};
     const messagePayload = chat.messagePayload || {};
     const user = chat.user || messagePayload.user || (event && event.user) || {};
@@ -613,9 +713,15 @@ function onMessage(event) {
     setSessionUser_(senderEmail, senderUserId, senderName);
     registerBotUserFromEvent_(event);
 
-    if (senderEmail && userNeedsTeamSelection_(senderEmail)) {
-      return reply_(getTeamPickerCard_(senderName, senderEmail, senderUserId));
-    }
+    if (
+  isDirectMessageEvent_(event) &&
+  senderEmail &&
+  userNeedsTeamSelection_(senderEmail)
+) {
+  return reply_(
+    getTeamPickerCard_(senderName, senderEmail, senderUserId)
+  );
+}
 
     let messageText =
       (event && event.chat && event.chat.messagePayload && event.chat.messagePayload.message &&
@@ -651,8 +757,17 @@ function onMessage(event) {
       return reply_(getEmployeeRolesCard_(normalizedText, senderEmail, senderUserId));
     }
 
-    if (!normalizedText || /^(hi|hello|hey|welcome|\/welcome|start|\/start|configure|\/configure|setup|\/setup)$/i.test(normalizedText)) {
-      return reply_(getWelcomeCard(senderName, senderEmail, senderUserId));
+    if (
+      !normalizedText ||
+      /^(hi|hello|hey|welcome|\/welcome|start|\/start|configure|\/configure|setup|\/setup)$/i.test(normalizedText)
+    ) {
+      if (!isDirectMessageEvent_(event)) {
+        return {};
+      }
+
+      return reply_(
+        getWelcomeCard(senderName, senderEmail, senderUserId)
+      );
     }
     if (/^(help|\/help|info)$/i.test(normalizedText)) {
       return reply_(getHelpCard(senderName, false, senderEmail, senderUserId));
@@ -807,7 +922,7 @@ function onMessage(event) {
       );
     }
 
-    // Only allow leave dates within the current calendar year.
+    // Allow the current calendar year plus January of the following year.
     if (!isLeaveDateWithinCurrentYear_(leaveInput)) {
       const currentYear = Utilities.formatDate(
         new Date(),
@@ -817,13 +932,13 @@ function onMessage(event) {
 
       return reply_(
         infoCard_(
-          "Leave Date Outside Current Year",
-          "Leave requests can only be submitted for dates within <b>" +
-            currentYear +
-            "</b>.<br><br>" +
-            "Please update your request so that the entire leave date or date range " +
-            "falls within " + currentYear + ".<br><br>" +
-            "<b>Example:</b> <code>leave on 25/10/" + currentYear + "</code>",
+          "Leave Date Outside Booking Window",
+          "Leave requests are accepted for the current calendar year (<b>" + currentYear +
+            "</b>) and January of <b>" + (Number(currentYear) + 1) +
+            "</b> only.<br><br>" +
+            "A date range must stay within a single calendar year. February " +
+            (Number(currentYear) + 1) + " and later are not open for booking yet.<br><br>" +
+            "<b>Example:</b> <code>leave on 04/01/" + (Number(currentYear) + 1) + "</code>",
           { userEmail: senderEmail, userId: senderUserId }
         )
       );
@@ -979,13 +1094,13 @@ function getWelcomeCard(userName, userEmail, userChatId) {
   }
 
   return {
-    text: "Welcome to Pixcity Leave Tracker. Apply for leave, check your balance, holidays, and team calendar below.",
+    text: "Welcome to Google Chat Leave Tracker. Apply for leave, check your balance, holidays, and team calendar below.",
     cardsV2: [{
       cardId: "welcomeCard",
       card: {
         header: {
           title: "👋 Hi " + (userName || "there") + "!",
-          subtitle: "Pixcity Leave Tracker"
+          subtitle: "Google Chat Leave Tracker"
         },
         sections: [
           { widgets: [
@@ -1147,19 +1262,19 @@ function saveNewRequest(record) {
     record.team || getUserTeam_(record.requesterEmail)
   );
 
-  const requestSheet = getTeamSheetName_(team);
-
-  ensureSheet_(requestSheet, [
-    "Request ID",
-    "Employee",
-    "Email",
-    "Date / Range",
-    "Leave Type",
-    "No of Days",
-    "Reason / Comment",
-    "Approvals",
-    "Final Status"
-  ]);
+  const leaveRange = parseLeaveRange_(record.leaveDate);
+  if (!leaveRange || isNaN(leaveRange.start.getTime()) || isNaN(leaveRange.end.getTime())) {
+    throw new Error("Invalid leave date/range: " + record.leaveDate);
+  }
+  if (leaveRange.start.getFullYear() !== leaveRange.end.getFullYear()) {
+    throw new Error("A leave request cannot span across two calendar years.");
+  }
+  if (!isLeaveDateWithinCurrentYear_(record.leaveDate)) {
+    throw new Error("Leave can be requested only for the current calendar year or January of the next calendar year.");
+  }
+  const leaveYear = leaveRange.start.getFullYear();
+  const requestSheet = getTeamSheetName_(team, leaveYear);
+  ensureSheet_(requestSheet, getLeaveSheetHeaders_());
 
   const requesterEmail = normalizeEmail_(record.requesterEmail);
   const requesterRoles = getUserRoles_(requesterEmail);
@@ -1277,46 +1392,135 @@ function getHrNotificationSettings_() {
   };
 }
 
+
 function sendLeaveApprovedEmail(data) {
   try {
-    const subject = "Leave Request : " + formatLeaveSubject_(data.leaveDate);
-    const leaveTypeText = data.leaveType === "HALF DAY" ? "half-day leave" : "leave";
-    const reasonSentence = data.leaveReason && data.leaveReason.trim()
-      ? "due to " + data.leaveReason.trim() + "."
-      : "for personal reasons.";
+    const settings = getSettingsValues_();
 
-    const leaveDetails = getLeaveCalculationDetails_(data.leaveDate, data.leaveType);
-    let durationText = "";
-    if (leaveDetails.workingDays > 0) {
-      durationText = " (" + leaveDetails.workingDays +
-        (leaveDetails.workingDays === 1 ? " working day" : " working days") +
-        (leaveDetails.breakdownNote ? ", " + leaveDetails.breakdownNote : "") +
-        ")";
+    // Email notifications are enabled only when explicitly set to TRUE.
+    const emailEnabled = /^(true|yes|1|enabled)$/i.test(
+      String(settings.LEAVE_APPROVAL_EMAIL_ENABLED || "").trim()
+    );
+
+    if (!emailEnabled) {
+      console.log("Leave approval email is disabled in Settings.");
+      return;
     }
 
-    const body =
-      "Dear Team,\n\n" +
-      "I would like to request " + leaveTypeText + durationText + " for " +
-      formatLeaveBodyDate_(data.leaveDate) + ", " + reasonSentence + "\n\n" +
-      "I will ensure that any pending work is completed or handed over appropriately before my leave. " +
-      "This leave request has been approved.\n\n" +
-      "Thank you.\n\n" +
-      "Best regards,\n" +
-      data.requesterName;
+    // Resolve employee and leave details.
+    const employeeName = String(data.requesterName || "Employee");
+    const employeeEmail = normalizeEmail_(data.requesterEmail);
+    const team = data.team || getUserTeam_(employeeEmail) || "N/A";
+    const requestId = data.requestId || "N/A";
 
+    const leaveDate = formatLeaveBodyDate_(data.leaveDate);
+
+    const leaveType = String(data.leaveType || "FULL DAY");
+    const leaveReason = String(data.leaveReason || "").trim() || "Not specified";
+
+    const leaveDetails = getLeaveCalculationDetails_(
+      data.leaveDate,
+      data.leaveType
+    );
+
+    const duration = leaveDetails.breakdownText || "N/A";
+
+    // Escape dynamic values before inserting them into the HTML template.
+    const placeholders = {
+      employeeName: escapeCardHtml_(employeeName),
+      employeeEmail: escapeCardHtml_(employeeEmail),
+      team: escapeCardHtml_(team),
+      leaveDate: escapeCardHtml_(leaveDate),
+      leaveType: escapeCardHtml_(leaveType),
+      duration: escapeCardHtml_(duration),
+      reason: escapeCardHtml_(leaveReason),
+      requestId: escapeCardHtml_(requestId)
+    };
+
+    // Replace placeholders in the configured subject.
+    let subject = String(
+      settings.LEAVE_APPROVAL_EMAIL_SUBJECT ||
+      "Leave Approved - {employeeName} - {leaveDate}"
+    );
+
+    Object.keys(placeholders).forEach(function (key) {
+      subject = subject.replace(
+        new RegExp("\\{" + key + "\\}", "g"),
+        placeholders[key]
+      );
+    });
+
+    // Replace placeholders in the configured HTML body.
+    let htmlBody = String(
+      settings.LEAVE_APPROVAL_EMAIL_BODY || ""
+    );
+
+    if (!htmlBody.trim()) {
+      console.warn("LEAVE_APPROVAL_EMAIL_BODY is empty. Email not sent.");
+      return;
+    }
+
+    Object.keys(placeholders).forEach(function (key) {
+      htmlBody = htmlBody.replace(
+        new RegExp("\\{" + key + "\\}", "g"),
+        placeholders[key]
+      );
+    });
+
+    // Convert HTML to readable plain text as a fallback.
+    const plainBody = htmlBody
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<\/p>/gi, "\n\n")
+      .replace(/<[^>]*>/g, "")
+      .replace(/&nbsp;/gi, " ")
+      .replace(/&amp;/gi, "&")
+      .replace(/&lt;/gi, "<")
+      .replace(/&gt;/gi, ">")
+      .replace(/&quot;/gi, '"')
+      .replace(/&#39;/gi, "'");
+
+    // Get HR recipients and CC from existing Settings reader.
     const hrSettings = getHrNotificationSettings_();
-    if (hrSettings.to.length === 0) return;
 
-    const options = {};
+    if (hrSettings.to.length === 0) {
+      console.warn("No HR notification recipients configured.");
+      return;
+    }
+
+    const options = {
+      htmlBody: htmlBody
+    };
+
+    // Avoid adding an address to CC if it is already in To.
     const toSet = new Set(hrSettings.to.map(normalizeEmail_));
-    const cc = hrSettings.cc.filter(email => !toSet.has(normalizeEmail_(email)));
-    if (cc.length > 0) options.cc = cc.join(",");
 
-    MailApp.sendEmail(hrSettings.to.join(","), subject, body, options);
+    const cc = hrSettings.cc.filter(function(email) {
+      return !toSet.has(normalizeEmail_(email));
+    });
+
+    if (cc.length > 0) {
+      options.cc = cc.join(",");
+    }
+
+    MailApp.sendEmail(
+      hrSettings.to.join(","),
+      subject,
+      plainBody,
+      options
+    );
+
+    console.log(
+      "Leave approval email sent successfully. Request ID: " + requestId
+    );
+
   } catch (error) {
-    console.error("sendLeaveApprovedEmail error:", error);
+    console.error(
+      "sendLeaveApprovedEmail error: " +
+      (error && error.stack ? error.stack : error)
+    );
   }
 }
+
 
 /**
  * =========================================================
@@ -1325,17 +1529,42 @@ function sendLeaveApprovedEmail(data) {
  */
 function registerBotUserFromEvent_(event) {
   event = event || {};
+
   const chat = event.chat || {};
   const messagePayload = chat.messagePayload || {};
-  const user = chat.user || messagePayload.user || event.user || {};
-  const space = chat.space || messagePayload.space || event.space || {};
+
+  const user =
+    chat.user ||
+    messagePayload.user ||
+    event.user ||
+    {};
+
+  const space =
+    chat.space ||
+    messagePayload.space ||
+    event.space ||
+    {};
+
+  // Fail closed: never register users from groups/channels or events
+  // where Google Chat did not provide a confirmed DIRECT_MESSAGE space.
+  if (String(space.type || "").toUpperCase() !== "DIRECT_MESSAGE") {
+    console.log("User registration skipped: event is not a confirmed direct message.");
+    return;
+  }
+
   const email = normalizeEmail_(user.email);
   const name = user.displayName || "Employee";
   const userId = user.name || "";
-  const spaceName = space.name || "";
+  const dmSpaceName = space.name || "";
 
   if (!email) return;
-  registerUserDirectly_(email, name, userId, spaceName);
+
+  registerUserDirectly_(
+    email,
+    name,
+    userId,
+    dmSpaceName
+  );
 }
 
 function getBotUserColumns_(headerRow) {
@@ -1582,45 +1811,35 @@ function isValidLeaveDate_(value) {
 
 /**
  * =========================================================
- * CURRENT CALENDAR YEAR VALIDATION
+ * LEAVE BOOKING WINDOW VALIDATION
  * =========================================================
- * Allows only single dates or date ranges entirely within the
- * current calendar year. Both ends of a range are checked.
+ * Allows dates in the current calendar year and January of the
+ * next calendar year. Date ranges must remain within one year.
  */
 function isLeaveDateWithinCurrentYear_(value) {
-  const currentYear = Number(
-    Utilities.formatDate(
-      new Date(),
-      Session.getScriptTimeZone(),
-      "yyyy"
-    )
-  );
+  const range = parseLeaveRange_(value);
+  if (!range || isNaN(range.start.getTime()) || isNaN(range.end.getTime())) return false;
 
-  const dates = String(value || "").split(/\s*-\s*/);
-  if (dates.length < 1 || dates.length > 2) return false;
+  const start = new Date(range.start.getFullYear(), range.start.getMonth(), range.start.getDate());
+  const end = new Date(range.end.getFullYear(), range.end.getMonth(), range.end.getDate());
+  if (start.getTime() > end.getTime()) return false;
 
-  for (let i = 0; i < dates.length; i++) {
-    const parts = dates[i].trim().split("/");
-    if (parts.length !== 3) return false;
+  // A request must stay within one calendar year.
+  if (start.getFullYear() !== end.getFullYear()) return false;
 
-    const day = Number(parts[0]);
-    const month = Number(parts[1]);
-    const year = Number(parts[2]);
+  const currentYear = Number(Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy"));
+  const leaveYear = start.getFullYear();
 
-    if (year !== currentYear) return false;
+  // Current calendar year is open for booking.
+  if (leaveYear === currentYear) return true;
 
-    // Reject impossible dates, e.g. 31/02/currentYear.
-    const date = new Date(year, month - 1, day);
-    if (
-      date.getFullYear() !== year ||
-      date.getMonth() !== month - 1 ||
-      date.getDate() !== day
-    ) {
-      return false;
-    }
+  // One-month year-end buffer: only January of the immediately following year.
+  // Example: during 2026, dates in January 2027 are allowed, February 2027 is not.
+  if (leaveYear === currentYear + 1) {
+    return start.getMonth() === 0 && end.getMonth() === 0;
   }
 
-  return true;
+  return false;
 }
 
 function parseLeaveDate_(value) {
@@ -1832,6 +2051,16 @@ function extractEventParameters_(event) {
 function onCardClick(event) {
   const lock = LockService.getScriptLock();
   try {
+    // SECURITY BOUNDARY: never execute card actions outside individual DMs.
+    // This protects approvals, cancellations, team changes and admin actions.
+    if (!isDirectMessageEvent_(event)) {
+      const spaceType = getChatSpaceType_(event) || "UNKNOWN";
+      console.log(
+        "Card interaction ignored outside a direct message. Space type: " + spaceType
+      );
+      return {};
+    }
+
     const params = extractEventParameters_(event);
     const actionType = params.action || "";
     const requestId = params.requestId || "";
@@ -2019,7 +2248,7 @@ function onCardClick(event) {
 function getRequestById_(requestId) {
   for (const entry of getAllTeamRequestSheets_()) {
     let data = [];
-    try { data = getTeamRequestData_(entry.team); } catch (e) { continue; }
+    try { data = getSheetData_(entry.sheetName); } catch (e) { continue; }
     if (!data || data.length < 2) continue;
     const cols = getRequestColumns_(data[0]);
     for (let i = 1; i < data.length; i++) {
@@ -2405,7 +2634,7 @@ function getAdminAccessDeniedCard_(userName, userEmail, userId) {
       card: {
         header: {
           title: "🔒 Admin Access Required",
-          subtitle: "Pixcity Leave Tracker · Role Permission"
+          subtitle: "Google Chat Leave Tracker · Role Permission"
         },
         sections: [
           {
@@ -2653,7 +2882,7 @@ function getManagerTeamSummaryCard_(targetYear, managerEmail, managerUserId, sel
       card: {
         header: {
           title: "📊 " + escapeCardHtml_(team) + " Leave Summary (" + year + ")",
-          subtitle: "Team: " + escapeCardHtml_(team) + " · Admin Executive Dossier · Pixcity"
+          subtitle: "Team: " + escapeCardHtml_(team) + " · Admin Executive Dossier · Google Chat"
         },
         sections: sections
       }
@@ -3103,7 +3332,8 @@ function getPendingApprovalsCard_(approverEmail, approverName, approverUserId) {
 
   const data = [];
   getAllTeamRequestSheets_().forEach(function (entry) {
-    const rows = getTeamRequestData_(entry.team);
+    let rows = [];
+    try { rows = getSheetData_(entry.sheetName); } catch (e) { return; }
     if (rows && rows.length > 1) {
       rows.slice(1).forEach(function (row, idx) { data.push({ row: row, team: entry.team, sheetName: entry.sheetName, rowNumber: idx + 2, headers: rows[0] }); });
     }
@@ -3253,7 +3483,7 @@ function getPendingApprovalsCard_(approverEmail, approverName, approverUserId) {
       card: {
         header: {
           title: "⏳ Pending Approvals (" + pendingRequests.length + ")",
-          subtitle: "Approver Dashboard · Pixcity Leave Tracker"
+          subtitle: "Approver Dashboard · Google Chat Leave Tracker"
         },
         sections: sections
       }
@@ -3856,6 +4086,224 @@ function installHolidayReminderTrigger() {
 }
 
 
+/**
+ * =========================================================
+ * GLOBAL COMPANY HOLIDAY ANNOUNCEMENT
+ * Separate from sendHolidayReminders().
+ *
+ * Sends one message to the configured Google Chat space exactly
+ * two working days before each company holiday.
+ * Working days are Monday-Friday, excluding company holidays.
+ * Schedule timezone: Asia/Kolkata.
+ * =========================================================
+ */
+function sendGlobalHolidayNotification() {
+  const settings = getSettingsValues_();
+  const enabled = /^(true|yes|1|enabled)$/i.test(
+    String(settings.HOLIDAY_GLOBAL_NOTIFICATION || "").trim()
+  );
+
+  if (!enabled) {
+    console.log("Global holiday notification is disabled in Settings.");
+    return;
+  }
+
+  // Incoming webhook sends the announcement directly to the target Chat space.
+  // The bot does not need to be added to that space and no Chat API OAuth token is used.
+  const webhookUrl = String(
+    settings.HOLIDAY_NOTIFICATION_WEBHOOK_URL || ""
+  ).trim();
+
+  if (!webhookUrl) {
+    console.error("HOLIDAY_NOTIFICATION_WEBHOOK_URL is missing in Settings.");
+    return;
+  }
+
+  if (!/^https:\/\/chat\.googleapis\.com\/v1\/spaces\/[^/]+\/messages(?:\?.*)?$/i.test(webhookUrl)) {
+    throw new Error(
+      "HOLIDAY_NOTIFICATION_WEBHOOK_URL is not a valid Google Chat incoming webhook URL."
+    );
+  }
+
+  const timezone = "Asia/Kolkata";
+  const todayKey = Utilities.formatDate(new Date(), timezone, "yyyy-MM-dd");
+  const holidays = getHolidayDates_();
+
+  if (!holidays.length) {
+    console.log("Global holiday notification: no holidays found.");
+    return;
+  }
+
+  // Build a date-key set for excluding company holidays from working days.
+  const holidayKeys = {};
+  holidays.forEach(function (holiday) {
+    if (!holiday || !holiday.date) return;
+    const key = Utilities.formatDate(holiday.date, timezone, "yyyy-MM-dd");
+    holidayKeys[key] = true;
+  });
+
+  const properties = PropertiesService.getScriptProperties();
+  let sent = 0;
+  let skipped = 0;
+  let failed = 0;
+
+  holidays.forEach(function (holiday) {
+    if (!holiday || !holiday.date) return;
+
+    const holidayKey = Utilities.formatDate(
+      holiday.date,
+      timezone,
+      "yyyy-MM-dd"
+    );
+
+    const notificationDateKey = getWorkingDaysBeforeHolidayKey_(
+      holidayKey,
+      2,
+      holidayKeys
+    );
+
+    // This function is triggered daily; send only on the calculated date.
+    if (notificationDateKey !== todayKey) return;
+
+    const trackingKey = "GLOBAL_HOLIDAY_NOTIFICATION_" + holidayKey;
+    if (properties.getProperty(trackingKey)) {
+      skipped++;
+      console.log("Already announced holiday " + holidayKey + ".");
+      return;
+    }
+
+    const dateForFormatting = new Date(holidayKey + "T12:00:00Z");
+    const weekday = Utilities.formatDate(dateForFormatting, timezone, "EEEE");
+    const day = Number(Utilities.formatDate(dateForFormatting, timezone, "d"));
+    const monthYear = Utilities.formatDate(dateForFormatting, timezone, "MMM yyyy");
+    const ordinal = getOrdinalSuffix_(day);
+    const formattedDate = weekday + ", " + (day < 10 ? "0" : "") + day + ordinal + " " + monthYear;
+    const holidayName = String(holiday.name || "Company Holiday").trim();
+
+    const message = {
+  text:
+      "📅 *Holiday Announcement*\n\n" +
+    "Hello <users/all>,\n\n" +
+    "Please note that *" + formattedDate + "* will be observed as a company holiday for the *Tech Team* and *GH Team (India)* on account of *" + holidayName + "*.\n\n" +
+    "Thank you for your attention."
+};
+
+    try {
+      // Track only after the webhook confirms successful delivery.
+      postGoogleChatWebhook_(webhookUrl, message);
+      properties.setProperty(trackingKey, todayKey);
+      sent++;
+      console.log("Global holiday announcement sent for " + holidayKey + " via incoming webhook.");
+    } catch (error) {
+      failed++;
+      console.error(
+        "Failed global holiday announcement for " + holidayKey + ": " + error
+      );
+    }
+  });
+
+  console.log(
+    "Global holiday notifications completed. Sent: " + sent +
+    ", skipped: " + skipped +
+    ", failed: " + failed
+  );
+}
+
+/**
+ * Posts a message to a Google Chat incoming webhook.
+ * No bot membership or OAuth access token is required.
+ */
+function postGoogleChatWebhook_(webhookUrl, message) {
+  if (!webhookUrl) {
+    throw new Error("Missing Google Chat incoming webhook URL.");
+  }
+
+  const response = UrlFetchApp.fetch(webhookUrl, {
+    method: "post",
+    contentType: "application/json; charset=UTF-8",
+    payload: JSON.stringify(message),
+    muteHttpExceptions: true
+  });
+
+  const status = response.getResponseCode();
+  if (status < 200 || status >= 300) {
+    throw new Error(
+      "Google Chat incoming webhook returned HTTP " + status + ": " +
+      response.getContentText()
+    );
+  }
+
+  return response.getContentText();
+}
+
+/**
+ * Returns the date key N working days before the supplied holiday date.
+ * Saturday, Sunday, and dates in company Holidays sheet are not working days.
+ * Date keys use yyyy-MM-dd and UTC arithmetic to avoid timezone/DST drift.
+ */
+function getWorkingDaysBeforeHolidayKey_(holidayDateKey, workingDays, holidayKeys) {
+  const parts = String(holidayDateKey).split("-").map(Number);
+  if (parts.length !== 3 || parts.some(function (part) { return !Number.isFinite(part); })) {
+    throw new Error("Invalid holiday date key: " + holidayDateKey);
+  }
+
+  const date = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+  let remaining = Math.max(0, Number(workingDays) || 0);
+
+  while (remaining > 0) {
+    date.setUTCDate(date.getUTCDate() - 1);
+    const weekday = date.getUTCDay(); // 0 = Sunday, 6 = Saturday
+    if (weekday === 0 || weekday === 6) continue;
+
+    const key = Utilities.formatDate(date, "UTC", "yyyy-MM-dd");
+    if (holidayKeys && holidayKeys[key]) continue;
+
+    remaining--;
+  }
+
+  return Utilities.formatDate(date, "UTC", "yyyy-MM-dd");
+}
+
+/** Returns the ordinal suffix for a day number (1st, 2nd, 3rd, 4th...). */
+function getOrdinalSuffix_(day) {
+  const value = Number(day);
+  const lastTwo = value % 100;
+  if (lastTwo >= 11 && lastTwo <= 13) return "th";
+  switch (value % 10) {
+    case 1: return "st";
+    case 2: return "nd";
+    case 3: return "rd";
+    default: return "th";
+  }
+}
+
+/**
+ * Run once manually to install the separate global-announcement trigger.
+ * Does not modify or replace installHolidayReminderTrigger().
+ */
+function installGlobalHolidayNotificationTrigger() {
+  const handler = "sendGlobalHolidayNotification";
+
+  // Replace only this feature's trigger; leave sendHolidayReminders untouched.
+  ScriptApp.getProjectTriggers().forEach(function (trigger) {
+    if (trigger.getHandlerFunction() === handler) {
+      ScriptApp.deleteTrigger(trigger);
+    }
+  });
+
+  ScriptApp.newTrigger(handler)
+    .timeBased()
+    .everyDays(1)
+    .atHour(9)
+    .inTimezone("Asia/Kolkata")
+    .create();
+
+  console.log(
+    "Global holiday notification trigger installed. It will run daily around 9 AM Asia/Kolkata."
+  );
+}
+
+
 
 function getTotalLeaveEntitlement_() {
   const settings = getSettingsValues_();
@@ -3894,6 +4342,97 @@ function getHolidayDates_() {
 
   _cachedHolidays = holidays;
   return holidays;
+}
+
+/**
+ * Removes old holiday reminder tracking properties.
+ *
+ * Only removes HOLIDAY_REMINDER properties.
+ * Keeps reminders for holidays within the last 30 days.
+ * Does not affect AY_REMINDER or other Script Properties.
+ */
+function cleanupOldHolidayReminderProperties() {
+  const scriptProperties = PropertiesService.getScriptProperties();
+  const allProperties = scriptProperties.getProperties();
+
+  const timezone = Session.getScriptTimeZone();
+
+  // Calculate the cutoff date (30 days ago).
+  const today = Utilities.formatDate(
+    new Date(),
+    timezone,
+    "yyyy-MM-dd"
+  );
+
+  const [year, month, day] = today.split("-").map(Number);
+
+  const cutoffDate = new Date(
+    Date.UTC(year, month - 1, day)
+  );
+
+  cutoffDate.setUTCDate(cutoffDate.getUTCDate() - 10);
+
+  const cutoffDateString = Utilities.formatDate(
+    cutoffDate,
+    "GMT",
+    "yyyy-MM-dd"
+  );
+
+  let deletedCount = 0;
+
+  Object.keys(allProperties).forEach(function (key) {
+
+    // Only process holiday reminder properties.
+    if (!key.startsWith("HOLIDAY_REMINDER_")) {
+      return;
+    }
+
+    // Extract holiday date from the property key.
+    const match = key.match(
+      /^HOLIDAY_REMINDER_(\d{4}-\d{2}-\d{2})_/
+    );
+
+    // Skip properties that don't match the expected format.
+    if (!match) {
+      return;
+    }
+
+    const holidayDate = match[1];
+
+    // Delete only reminders for holidays older than 30 days.
+    if (holidayDate < cutoffDateString) {
+      scriptProperties.deleteProperty(key);
+      deletedCount++;
+    }
+  });
+
+  Logger.log(
+    "Holiday reminder cleanup completed. Deleted: " + deletedCount
+  );
+}
+
+function createHolidayReminderCleanupTrigger() {
+  const handler = "cleanupOldHolidayReminderProperties";
+
+  // Avoid creating duplicate triggers.
+  const existingTrigger = ScriptApp.getProjectTriggers().some(
+    function (trigger) {
+      return trigger.getHandlerFunction() === handler;
+    }
+  );
+
+  if (existingTrigger) {
+    Logger.log("Holiday cleanup trigger already exists.");
+    return;
+  }
+
+  ScriptApp.newTrigger(handler)
+    .timeBased()
+    .everyDays(1)
+    .atHour(3)
+    .create();
+
+  Logger.log("Holiday cleanup trigger created.");
 }
 
 /**
@@ -4010,7 +4549,7 @@ function appendSheetRow_(sheetName, values) {
   const encodedRange = encodeURIComponent("'" + sheetName.replace(/'/g, "''") + "'!A:Z");
   return sheetsApiRequest_(
     "post",
-    "/values/" + encodedRange + ":append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS",
+    "/values/" + encodedRange + ":append?valueInputOption=RAW&insertDataOption=INSERT_ROWS",
     { values: [values] }
   );
 }
@@ -4078,6 +4617,80 @@ function normalizeEmail_(email) {
   return String(email || "").toLowerCase().trim();
 }
 
+function testGlobalHolidayNotification() {
+  const settings = getSettingsValues_();
+  const webhookUrl = String(
+    settings.HOLIDAY_NOTIFICATION_WEBHOOK_URL || ""
+  ).trim();
+
+  if (!webhookUrl) {
+    throw new Error("HOLIDAY_NOTIFICATION_WEBHOOK_URL is missing in Settings.");
+  }
+
+  if (!/^https:\/\/chat\.googleapis\.com\/v1\/spaces\/[^/]+\/messages(?:\?.*)?$/i.test(webhookUrl)) {
+    throw new Error(
+      "HOLIDAY_NOTIFICATION_WEBHOOK_URL is not a valid Google Chat incoming webhook URL."
+    );
+  }
+
+  const timezone = "Asia/Kolkata";
+  const todayKey = Utilities.formatDate(new Date(), timezone, "yyyy-MM-dd");
+  const holidays = getHolidayDates_();
+
+  const upcomingHoliday = holidays
+    .filter(function (holiday) {
+      return holiday && holiday.date &&
+        Utilities.formatDate(holiday.date, timezone, "yyyy-MM-dd") >= todayKey;
+    })
+    .sort(function (a, b) {
+      return a.date.getTime() - b.date.getTime();
+    })[0];
+
+  if (!upcomingHoliday) {
+    throw new Error(
+      "No upcoming company holiday was found. Add an upcoming holiday to the Holidays sheet before running this test."
+    );
+  }
+
+  const holidayKey = Utilities.formatDate(
+    upcomingHoliday.date,
+    timezone,
+    "yyyy-MM-dd"
+  );
+
+  const dateForFormatting = new Date(holidayKey + "T12:00:00Z");
+  const weekday = Utilities.formatDate(dateForFormatting, timezone, "EEEE");
+  const day = Number(Utilities.formatDate(dateForFormatting, timezone, "d"));
+  const monthYear = Utilities.formatDate(dateForFormatting, timezone, "MMM yyyy");
+
+  const formattedDate =
+    weekday + ", " +
+    (day < 10 ? "0" : "") +
+    day +
+    getOrdinalSuffix_(day) +
+    " " +
+    monthYear;
+
+  const holidayName = String(
+    upcomingHoliday.name || "Company Holiday"
+  ).trim();
+
+  const message = {
+  text:
+    "📅 *Holiday Announcement*\n\n" +
+    "Hello <users/all>,\n\n" +
+    "Please note that Tomorrow will be observed as a company holiday for the *Tech Team* and *GH Team (India)* on account of deepavali.\n\n" +
+    "Thank you for your attention."
+};
+
+  postGoogleChatWebhook_(webhookUrl, message);
+
+  console.log(
+    "Test global holiday message successfully sent for " +
+    holidayKey + " (" + holidayName + ") via incoming webhook."
+  );
+}
+
 /**
  * =========================================================
  * WEB APP HANDLER (AUTO-REGISTERS USER UPON OAUTH COMPLETION)
@@ -4108,7 +4721,7 @@ function doGet(e) {
   html += ".btn{display:inline-block;background:#1a73e8;color:white;padding:12px 24px;border-radius:24px;text-decoration:none;font-weight:600;}";
   html += "</style></head><body><div class='card'>";
   html += "<h2>✅ Authorization Complete!</h2>";
-  html += "<p>Pixcity Leave Tracker is authorized and ready to use.</p>";
+  html += "<p>Google Chat Leave Tracker is authorized and ready to use.</p>";
 
   if (redirectUri) {
     html += "<p><small style='color:#80868B;'>Redirecting back to Google Chat...</small></p>";
@@ -4121,38 +4734,72 @@ function doGet(e) {
 
   html += "</div></body></html>";
   return HtmlService.createHtmlOutput(html)
-    .setTitle("Pixcity Leave Tracker - Authorization Complete")
+    .setTitle("Google Chat Leave Tracker - Authorization Complete")
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
 
 function doPost(e) {
   try {
     if (!e || !e.postData || !e.postData.contents) {
-      return ContentService.createTextOutput(JSON.stringify({ text: "Empty payload" }))
+      return ContentService
+        .createTextOutput(JSON.stringify({ text: "Empty payload" }))
         .setMimeType(ContentService.MimeType.JSON);
     }
+
     const event = JSON.parse(e.postData.contents);
-    const eventType = (event && event.type) || "";
+    const eventType = String((event && event.type) || "").toUpperCase();
     let response = {};
-    if (eventType === "ADDED_TO_SPACE") response = onAddedToSpace(event);
-    else if (eventType === "MESSAGE") response = onMessage(event);
-    else if (eventType === "CARD_CLICKED") response = onCardClick(event);
-    else if (eventType === "REMOVED_FROM_SPACE") { onRemoveFromSpace(event); response = {}; }
-    else {
-      if (event && (event.message || (event.chat && event.chat.messagePayload))) response = onMessage(event);
-      else response = getWelcomeCard("there", "", "");
+
+    switch (eventType) {
+      case "ADDED_TO_SPACE":
+        response = onAddedToSpace(event);
+        break;
+
+      case "MESSAGE":
+        response = onMessage(event);
+        break;
+
+      case "CARD_CLICKED":
+        response = onCardClick(event);
+        break;
+
+      case "REMOVED_FROM_SPACE":
+        onRemoveFromSpace(event);
+        response = {};
+        break;
+
+      default:
+        // Fail closed: unknown events must never receive a welcome card.
+        console.log("Unhandled Google Chat event: " + eventType + ". No response sent.");
+        response = {};
+        break;
     }
-    return ContentService.createTextOutput(JSON.stringify(response)).setMimeType(ContentService.MimeType.JSON);
+
+    return ContentService
+      .createTextOutput(JSON.stringify(response))
+      .setMimeType(ContentService.MimeType.JSON);
+
   } catch (err) {
-    console.error("doPost error: " + (err && err.stack ? err.stack : err));
+    console.error(
+      "doPost error: " + (err && err.stack ? err.stack : err)
+    );
+
     let errorResponse;
     try {
-      errorResponse = infoCard_("Error", "Error processing request. Check Apps Script Executions for the error details.");
+      errorResponse = infoCard_(
+        "Error",
+        "Error processing request. Check Apps Script Executions for the error details."
+      );
     } catch (cardError) {
-      console.error("doPost error-card failure: " + (cardError && cardError.stack ? cardError.stack : cardError));
+      console.error(
+        "doPost error-card failure: " +
+        (cardError && cardError.stack ? cardError.stack : cardError)
+      );
       errorResponse = { text: "Error processing request." };
     }
-    return ContentService.createTextOutput(JSON.stringify(errorResponse))
+
+    return ContentService
+      .createTextOutput(JSON.stringify(errorResponse))
       .setMimeType(ContentService.MimeType.JSON);
   }
 }
